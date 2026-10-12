@@ -27,6 +27,39 @@ CANDLE_LIMIT = 200
 REQUEST_TIMEOUT = 12
 QUOTE_CURRENCIES = {"GBP", "USD"}
 
+st.set_page_config(page_title="Coinbase Smart Dip Trading Agent", page_icon="📈", layout="wide")
+
+def read_json(path: Path, default: Any) -> Any:
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return default
+
+def write_json(path: Path, data: Any) -> None:
+    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+
+def default_state() -> dict:
+    return {
+        "cash_gbp": STARTING_CASH_GBP,
+        "positions": {},
+        "closed_trades": [],
+        "last_prices": {},
+        "starting_cash_gbp": STARTING_CASH_GBP,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+def load_state() -> dict:
+    return read_json(STATE_FILE, default_state())
+
+def save_state(state: dict) -> None:
+    write_json(STATE_FILE, state)
+
+# Initialize session state immediately before anything else
+if "state" not in st.session_state:
+    st.session_state.state = load_state()
+
 def api_get(path: str, params: dict | None = None) -> Any:
     response = requests.get(
         f"{API}{path}",
@@ -89,41 +122,6 @@ def to_gbp(amount: float, quote: str, gbp_usd: float) -> float:
         return amount / gbp_usd if gbp_usd > 0 else amount / 1.27
     return amount
 
-def read_json(path: Path, default: Any) -> Any:
-    try:
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return default
-
-def write_json(path: Path, data: Any) -> None:
-    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-
-def default_state() -> dict:
-    return {
-        "cash_gbp": STARTING_CASH_GBP,
-        "positions": {},
-        "closed_trades": [],
-        "last_prices": {},
-        "starting_cash_gbp": STARTING_CASH_GBP,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-def load_state() -> dict:
-    return read_json(STATE_FILE, default_state())
-
-def save_state(state: dict) -> None:
-    write_json(STATE_FILE, state)
-
-def load_memory() -> list:
-    return read_json(MEMORY_FILE, [])
-
-def save_experiment(row: dict) -> None:
-    memory = load_memory()
-    memory.append({**row, "tested_at": datetime.now(timezone.utc).isoformat()})
-    write_json(MEMORY_FILE, memory[-2000:])
-
 def mark_positions(state: dict, products: pd.DataFrame, gbp_usd: float) -> tuple[float, list[str]]:
     errors = []
     for product_id, pos in list(state["positions"].items()):
@@ -155,6 +153,4 @@ def paper_buy(state: dict, product_id: str, quote: str, price: float, gbp_usd: f
         allocation_gbp = available
     budget_gbp = max(0.0, min(float(allocation_gbp), available))
     if budget_gbp < MIN_POSITION_GBP:
-        return f"Allocation must be at least £{MIN_POSITION_GBP:.2f}."
-    budget_quote = budget_gbp if quote == "GBP" else budget_gbp * gbp_usd
-    spend_quote = budget_quote
+        return f
