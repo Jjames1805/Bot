@@ -44,4 +44,27 @@ def api_get(path: str, params: dict | None = None) -> Any:
         f"{API}{path}",
         params=params,
         timeout=REQUEST_TIMEOUT,
-        headers={"User-Agent": "Coinbase-Paper-Research-
+        headers={"User-Agent": "Coinbase-Paper-Research-Agent/1.0"},
+    )
+    response.raise_for_status()
+    return response.json()
+
+@st.cache_data(ttl=20, show_spinner=False)
+def get_products() -> pd.DataFrame:
+    raw = api_get("/products")
+    rows = []
+    for item in raw:
+        if item.get("quote_currency") not in QUOTE_CURRENCIES:
+            continue
+        if item.get("status") != "online" or item.get("trading_disabled", False):
+            continue
+        rows.append({
+            "product_id": item.get("id"),
+            "base": item.get("base_currency"),
+            "quote": item.get("quote_currency"),
+            "base_min_size": float(item.get("base_min_size") or 0),
+        })
+    return pd.DataFrame(rows)
+
+@st.cache_data(ttl=5, show_spinner=False)
+def get_ticker(product_id: str) -> 
