@@ -105,6 +105,11 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["lower"] = out["sma20"] - 2 * out["std20"]
     out["vol_mean"] = out["volume"].rolling(20).mean()
     out["ret"] = close.pct_change()
+    
+    # Adaptive / Out-of-the-box indicators
+    out["atr"] = (out["high"] - out["low"]).rolling(14).mean()
+    out["volatility"] = out["ret"].rolling(20).std()
+    out["momentum_score"] = (close - close.shift(10)) / close.shift(10)
     return out
 
 def strategy_signal(frame: pd.DataFrame, strategy: str) -> pd.Series:
@@ -124,9 +129,17 @@ def strategy_signal(frame: pd.DataFrame, strategy: str) -> pd.Series:
     elif strategy == "Trend pullback":
         buy = (d["ema_fast"] > d["ema_slow"]) & (d["close"] > d["ema_slow"]) & (d["rsi"].between(40, 55))
         sell = (d["ema_fast"] < d["ema_slow"]) | (d["rsi"] > 72)
+    elif strategy == "Adaptive Regime Switch":
+        # Dynamic strategy switching between Mean Reversion and Volatility Breakout based on ATR & Volume
+        high_vol = d["volatility"] > d["volatility"].rolling(50).median()
+        buy_breakout = high_vol & (d["close"] > d["high"].shift(1).rolling(15).max()) & (d["volume"] > 1.2 * d["vol_mean"])
+        buy_reversion = (~high_vol) & (d["rsi"] < 35) & (d["close"] < d["lower"])
+        buy = buy_breakout | buy_reversion
+        sell = (d["rsi"] > 65) | (d["close"] < d["ema_slow"])
     else:
         buy = pd.Series(False, index=d.index)
         sell = pd.Series(False, index=d.index)
+    
     signal = pd.Series(0, index=d.index, dtype=int)
     signal.loc[buy.fillna(False)] = 1
     signal.loc[sell.fillna(False)] = -1
@@ -138,6 +151,7 @@ STRATEGIES = [
     "Bollinger rebound",
     "Volume breakout",
     "Trend pullback",
+    "Adaptive Regime Switch",
 ]
 
 def backtest(frame: pd.DataFrame, strategy: str, fee_rate: float = FEE_RATE) -> dict:
@@ -482,11 +496,10 @@ def continuous_paper_trader():
         activity, cycle_errors = auto_paper_cycle(current_state, products, gbp_usd, auto_market_limit)
         portfolio_value, price_errors_now = mark_positions(current_state, products, gbp_usd)
     net_pnl = portfolio_value - float(current_state["starting_cash_gbp"])
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3 = st.columns(3)
     m1.metric("Paper portfolio", f"£{portfolio_value:.2f}", f"{net_pnl:+.2f} vs start")
     m2.metric("Available paper cash", f"£{float(current_state['cash_gbp']):.2f}")
     m3.metric("Open positions", str(len(current_state["positions"])))
-    m4.metric("Score", f"{net_pnl:+.2f} points", "1 point per £1 net P&L")
     if price_errors_now:
         st.warning("Some price requests failed. " + " | ".join(price_errors_now[:4]))
     st.session_state.last_auto_activity = pd.DataFrame(activity)
