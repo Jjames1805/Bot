@@ -196,10 +196,10 @@ def paper_sell(state: dict, product_id: str, price: float, gbp_usd: float, reaso
     save_state(state)
     return f"Paper sell recorded: {product_id}; net P&L £{pnl_gbp:.2f} ({pnl_gbp:+.2f} points)."
 
-def aggressive_momentum_cycle(state: dict, products: pd.DataFrame, gbp_usd: float):
+def smart_pullback_cycle(state: dict, products: pd.DataFrame, gbp_usd: float):
     activity, errors = [], []
     
-    # 1. Manage existing positions: take profit if +3% or cut losses if -2.5%
+    # 1. Manage existing positions: take profit at +5% or stop loss at -2.5%
     for product_id, pos in list(state["positions"].items()):
         try:
             ticker = get_ticker(product_id)
@@ -208,8 +208,8 @@ def aggressive_momentum_cycle(state: dict, products: pd.DataFrame, gbp_usd: floa
             entry = float(pos["entry_price"])
             pnl_pct = (price / entry - 1) * 100
             
-            if pnl_pct >= 3.0:
-                msg = paper_sell(state, product_id, price, gbp_usd, reason="Target profit hit (+3%)")
+            if pnl_pct >= 5.0:
+                msg = paper_sell(state, product_id, price, gbp_usd, reason="Take profit hit (+5%)")
                 activity.append({"Market": product_id, "Action": "TAKE PROFIT", "Reason": f"Gain: {pnl_pct:.2f}%", "Details": msg})
             elif pnl_pct <= -2.5:
                 msg = paper_sell(state, product_id, price, gbp_usd, reason="Stop loss triggered (-2.5%)")
@@ -219,7 +219,7 @@ def aggressive_momentum_cycle(state: dict, products: pd.DataFrame, gbp_usd: floa
         except Exception as exc:
             errors.append(f"{product_id}: {type(exc).__name__}: {exc}")
 
-    # 2. Scan ALL markets for aggressive momentum breakout entries
+    # 2. Scan for strong upward momentum assets experiencing a healthy intraday pullback
     if len(state["positions"]) < MAX_OPEN_POSITIONS and state["cash_gbp"] >= MIN_POSITION_GBP:
         candidates = []
         for _, product in products.iterrows():
@@ -228,33 +228,44 @@ def aggressive_momentum_cycle(state: dict, products: pd.DataFrame, gbp_usd: floa
                 continue
             try:
                 candles = get_candles(product_id)
-                if len(candles) < 15:
+                if len(candles) < 30:
                     continue
                 close = candles["close"]
                 volume = candles["volume"]
                 
-                # Check recent 1-hour and 4-hour performance + volume surge
-                ret_1h = (close.iloc[-1] / close.iloc[-4] - 1) * 100
-                ret_4h = (close.iloc[-1] / close.iloc[-16] - 1) * 100 if len(close) >= 16 else ret_1h
-                vol_recent = volume.tail(3).mean()
-                vol_baseline = volume.iloc[-20:-3].mean() if len(volume) >= 20 else vol_recent
-                vol_ratio = vol_recent / vol_baseline if vol_baseline > 0 else 1.0
+                # Must be up over the recent 24h window
+                ret_24h = (close.iloc[-1] / close.iloc[-24] - 1) * 100 if len(close) >= 24 else 0
+                if ret_24h < 2.0:
+                    continue
                 
-                # High-momentum criteria: Positive momentum with a volume expansion
-                if ret_1h > 0.8 and ret_4h > 1.5 and vol_ratio > 1.3:
-                    score = ret_1h + (vol_ratio * 2)
-                    candidates.append({
-                        "product_id": product_id,
-                        "quote": product["quote"],
-                        "score": score,
-                        "ret_1h": ret_1h,
-                        "vol_ratio": vol_ratio
-                    })
+                # Calculate RSI (14)
+                delta = close.diff()
+                gain = delta.clip(lower=0).rolling(14).mean()
+                loss = (-delta.clip(upper=0)).rolling(14).mean()
+                rs = gain / loss.replace(0, np.nan)
+                rsi = 100 - (100 / (1 + rs))
+                current_rsi = float(rsi.iloc[-1])
+                
+                # Healthy pullback condition: RSI between 42 and 58 on an overall uptrend
+                if 42 <= current_rsi <= 58:
+                    local_high = close.tail(8).max()
+                    current_price = close.iloc[-1]
+                    pullback = (current_price / local_high - 1) * 100
+                    
+                    if -3.0 <= pullback <= -0.5:
+                        score = ret_24h - abs(pullback)
+                        candidates.append({
+                            "product_id": product_id,
+                            "quote": product["quote"],
+                            "score": score,
+                            "ret_24h": ret_24h,
+                            "rsi": current_rsi,
+                            "pullback": pullback
+                        })
             except Exception:
                 continue
             time.sleep(0.02)
             
-        # Sort candidates by best momentum score
         candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)
         
         for cand in candidates:
@@ -265,13 +276,12 @@ def aggressive_momentum_cycle(state: dict, products: pd.DataFrame, gbp_usd: floa
                 ticker = get_ticker(pid)
                 price = float(ticker["price"])
                 cash = float(state["cash_gbp"])
-                # Allocate a healthy fraction (up to 30% of remaining cash per trade)
-                allocation = min(cash, max(MIN_POSITION_GBP, cash * 0.30))
-                msg = paper_buy(state, pid, cand["quote"], price, gbp_usd, "Momentum Breakout", allocation_gbp=allocation)
+                allocation = min(cash, max(MIN_POSITION_GBP, cash * 0.25))
+                msg = paper_buy(state, pid, cand["quote"], price, gbp_usd, "Dip Buy on Uptrend", allocation_gbp=allocation)
                 activity.append({
                     "Market": pid, 
-                    "Action": "MOMENTUM BUY", 
-                    "Reason": f"1h move: +{cand['ret_1h']:.2f}%, Vol ratio: {cand['vol_ratio']:.1f}x", 
+                    "Action": "DIP BUY", 
+                    "Reason": f"24h: +{cand['ret_24h']:.1f}%, RSI: {cand['rsi']:.1f}, Dip: {cand['pullback']:.1f}%", 
                     "Details": msg
                 })
             except Exception as exc:
@@ -279,12 +289,12 @@ def aggressive_momentum_cycle(state: dict, products: pd.DataFrame, gbp_usd: floa
 
     save_state(state)
     if not activity:
-        activity.append({"Market": "—", "Action": "SCANNING", "Reason": "Searching for high-momentum breakouts", "Details": ""})
+        activity.append({"Market": "—", "Action": "SCANNING", "Reason": "Waiting for high-probability dip entries", "Details": ""})
     return activity, errors
 
-st.set_page_config(page_title="Coinbase Momentum Trading Agent", page_icon="🚀", layout="wide")
-st.title("🚀 Coinbase High-Momentum Paper Trading Agent")
-st.caption("Scanning ALL GBP/USD assets • Aggressive intraday momentum capture • Simulated orders only")
+st.set_page_config(page_title="Coinbase Smart Dip Trading Agent", page_icon="📈", layout="wide")
+st.title("📈 Coinbase Smart Dip Trading Agent")
+st.caption("Scanning all GBP/USD assets • Buying healthy pullbacks on strong trends • Simulated orders only")
 
 if "state" not in st.session_state:
     st.session_state.state = load_state()
@@ -298,14 +308,14 @@ except Exception as exc:
     st.error(f"Could not load Coinbase public market data: {exc}")
     st.stop()
 
-st.subheader("Live momentum execution engine")
-st.write("Continuously scans the entire exchange for volume spikes and upward breakouts every 30 seconds.")
+st.subheader("Automated trading execution")
+st.write("Scans all exchange markets every 30 seconds for optimal entry points.")
 
 @st.fragment(run_every=30)
 def continuous_trader():
     current_state = st.session_state.state
-    with st.spinner("Executing high-momentum trading cycle…"):
-        activity, cycle_errors = aggressive_momentum_cycle(current_state, products, gbp_usd)
+    with st.spinner("Executing smart trading cycle…"):
+        activity, cycle_errors = smart_pullback_cycle(current_state, products, gbp_usd)
         portfolio_value, price_errors_now = mark_positions(current_state, products, gbp_usd)
     net_pnl = portfolio_value - float(current_state["starting_cash_gbp"])
     
