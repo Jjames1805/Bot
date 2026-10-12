@@ -46,3 +46,26 @@ def get_products() -> pd.DataFrame:
         if item.get("quote_currency") not in QUOTE_CURRENCIES:
             continue
         if item.get("status") != "online" or item.get("trading_disabled", False):
+            continue
+        rows.append({
+            "product_id": item.get("id"),
+            "base": item.get("base_currency"),
+            "quote": item.get("quote_currency"),
+            "base_min_size": float(item.get("base_min_size") or 0),
+        })
+    return pd.DataFrame(rows)
+
+@st.cache_data(ttl=5, show_spinner=False)
+def get_ticker(product_id: str) -> dict:
+    return api_get(f"/products/{product_id}/ticker")
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_candles(product_id: str, granularity: int = CANDLE_GRANULARITY) -> pd.DataFrame:
+    raw = api_get(f"/products/{product_id}/candles", {"granularity": granularity})
+    if not raw:
+        return pd.DataFrame()
+    frame = pd.DataFrame(raw, columns=["time", "low", "high", "open", "close", "volume"])
+    frame["time"] = pd.to_datetime(frame["time"], unit="s", utc=True)
+    for col in ["low", "high", "open", "close", "volume"]:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    return frame.sort_values("time").drop_duplicates("time").tail(CANDLE_LIMI
